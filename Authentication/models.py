@@ -47,8 +47,16 @@ class CustomUserManager(BaseUserManager):
         except:
                raise ValueError('An Error Occured Please Try Again')  
 
-
+class Privacy:
+    privacy_choices = [
+        ('public', 'Public'), 
+        ('followers', 'Followers'), 
+        ('private', 'Private')
+     ]
+    default_choice = 'public' 
+    
 class CustomUser(AbstractUser):
+
     email = models.EmailField(unique=True)
     username = models.CharField(max_length=255, null =True,blank=True,unique = True)
     full_name = models.CharField(max_length= 100)
@@ -57,6 +65,7 @@ class CustomUser(AbstractUser):
     is_verified = models.BooleanField(default=False)
     profile_picture = models.CharField(max_length=250,blank=True, null=True)
     bio = models.TextField(blank=True,null=True)
+    profile_privacy = models.CharField(choices=Privacy.privacy_choices, default='public', max_length=10)
     objects = CustomUserManager()
 
     USERNAME_FIELD = 'username'
@@ -64,7 +73,6 @@ class CustomUser(AbstractUser):
    
     def __str__(self):
         return self.full_name
-
 
 
 

@@ -8,12 +8,14 @@ urlpatterns = [
     path('make-comment/<int:post_id>/', MakeComment.as_view(), name='make-comment'),
     path('repost/<int:post_id>/', SharePost.as_view(), name='repost'),
     path('users/follow-toggle/<str:username>', FollowOrUnfollow.as_view(), name='follow'),
-    path('users/followers/', ListFollowers.as_view(), name='list-followers'),
+    path('users/followers/', ListFollowersAndFollowing.as_view(), name='list-followers'),
     path('users/following/', ListFollowing.as_view(), name='list-following'),
     path('groups/create/', CreateGroup.as_view(), name='create-group'),
     path('groups/<int:group_id>/manage/', ManageGroup.as_view(), name='manage-group'),
     path('groups/<int:group_id>/join/', JoinGroup.as_view(), name='join-group'),
     path('groups/<int:group_id>/leave/', LeaveGroup.as_view(), name='leave-group'),
-    
-    # path('timeline/', Timeline.as_view(), name='timeline'),
+    path('search/', Search.as_view(), name='search'),
+    path('timeline/', GetPosts.as_view(), name='timeline'),
+    path('trending-posts/', GetTrendingPosts.as_view(), name='trending-posts'),
+
 ]

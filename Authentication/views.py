@@ -19,7 +19,6 @@ from rest_framework.exceptions import NotFound
 import jwt
 from helpers.send_emails import send_activation_email
 from helpers.utils import decode_token,encode_token
-from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 import cloudinary
 import cloudinary.uploader
@@ -282,6 +281,7 @@ class EditUserDetails(generics.GenericAPIView):
 
             }
         return context
+    
     def put(self, request, *args, **kwargs):
         encoded_id =kwargs.get("id")
         user_id = decode_token(encoded_id)

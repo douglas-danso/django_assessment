@@ -3,6 +3,7 @@ from .models import CustomUser
 from helpers.validator import CustomPasswordValidator,validate_input
 from rest_framework.response import Response
 from rest_framework import status
+from .models import Privacy
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
@@ -101,7 +102,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = CustomUser
-        fields = ['full_name', 'bio']
+        fields = ['full_name', 'bio','profile_privacy']
 
     full_name = serializers.CharField(required=False) 
 
@@ -110,9 +111,15 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         bio = validated_data.get('bio')
         full_name= validated_data.get('full_name')
+        profile_privacy = validated_data.get('profile_privacy',Privacy.default_choice)
         if bio:
             instance.bio = bio
         if full_name:
             instance.full_name = full_name
+        if profile_privacy:
+            valid_privacy_choices = [choice[0] for choice in Privacy.privacy_choices]
+            if profile_privacy not in valid_privacy_choices:
+                return Response({"detail": f"Invalid choice. Allowed values: {', '.join(valid_privacy_choices)}"}, status=status.HTTP_400_BAD_REQUEST)
+            instance.profile_privacy = profile_privacy
         instance.save()
         return instance

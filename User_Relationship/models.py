@@ -1,5 +1,5 @@
 from django.db import models
-from Authentication.models import CustomUser
+from Authentication.models import CustomUser,Privacy
 
 class UserRelationship(models.Model):
     follower = models.ForeignKey(CustomUser,on_delete=models.CASCADE,related_name='following_relationships')
@@ -13,6 +13,7 @@ class Posts(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     likes = models.ManyToManyField(CustomUser, related_name='liked_posts')
     original_post = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='reposts')
+    post_privacy = models.CharField(choices=Privacy.privacy_choices, default='public', max_length=10)
 
 class Comments(models.Model):
     comment_user = models.ForeignKey(CustomUser,on_delete=models.CASCADE,related_name='comments' )

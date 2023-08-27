@@ -1,5 +1,5 @@
 from .models import UserRelationship,Groups
-from Authentication.models import CustomUser
+from Authentication.models import CustomUser,Privacy
 from rest_framework.views import APIView
 from django.http import JsonResponse
 from rest_framework.response import Response
@@ -8,7 +8,7 @@ from django.core.cache import cache
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from .models import Posts,Comments
-from django.db.models import Q
+from django.db.models import Q,F,Count
 import cloudinary
 from rest_framework import status
 from .signals import get_new_followers,get_new_comments,like_a_post,like_a_comment
@@ -40,7 +40,11 @@ class MakePosts(APIView):
         user = request.user
         content = request.data.get('content')
         file_upload = request.FILES.get('file')
-        
+        post_privacy  = request .data.get('post_privacy',Privacy.default_choice)
+        print(Privacy.privacy_choices)
+        valid_privacy_choices = [choice[0] for choice in Privacy.privacy_choices]
+        if post_privacy not in valid_privacy_choices:
+            return Response({"detail": f"Invalid choice. Allowed values: {', '.join(valid_privacy_choices)}"}, status=status.HTTP_400_BAD_REQUEST)
         if file_upload:
             # Use ImageField and FileField validation
             if file_upload.content_type.startswith('image') or file_upload.content_type.startswith('video'):
@@ -48,12 +52,12 @@ class MakePosts(APIView):
                 file_url = data.get('file_url')
                 public_id = data.get('public_id')
                 print(file_upload)
-                Posts.objects.create(file=file_url, content=content, user=user)
+                Posts.objects.create(file=file_url, content=content, user=user,post_privacy=post_privacy)
                 return Response({'detail': 'Post created successfully', 'public_id': public_id}, status=status.HTTP_200_OK)
             else:
                 return Response({'detail': 'Invalid file type'}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            Posts.objects.create(content=content, user=user)
+            Posts.objects.create(content=content, user=user,post_privacy=post_privacy)
             return Response({'detail': 'Post created successfully'}, status=status.HTTP_200_OK)
 
 class EditPost(APIView):      
@@ -61,11 +65,20 @@ class EditPost(APIView):
         user = request.user
         content = request.data.get('content')
         file_upload = request.FILES.get('file')
-        
+        post_privacy  = request .data.get('post_privacy')
         post = get_object_or_404(Posts,id=post_id)
         
         if post.user != user:
             return Response({'detail': 'You don\'t have permission to edit this post.'}, status=status.HTTP_403_FORBIDDEN)
+         
+        post_privacy  = request .data.get('post_privacy',Privacy.default_choice)
+        print(Privacy.privacy_choices)
+        valid_privacy_choices = [choice[0] for choice in Privacy.privacy_choices]
+        if post_privacy not in valid_privacy_choices:
+            return Response({"detail": f"Invalid choice. Allowed values: {', '.join(valid_privacy_choices)}"}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            post.post_privacy = post_privacy
+            post.save()
         if file_upload:
             if file_upload.content_type.startswith('image') or file_upload.content_type.startswith('video'):
                 file_object = MakePosts
@@ -204,13 +217,31 @@ class FollowOrUnfollow(APIView):
             relationship.delete()
             return Response({'detail': f'You have unfollowed {following_user.username}'}, status=status.HTTP_200_OK)
 
-class ListFollowers(APIView):
+class ListFollowersAndFollowing(APIView):
     def get(self, request, *args, **kwargs):
         username = request.GET.get('username')
         user = get_object_or_404(CustomUser, username=username)
-        followers = user.follower_relationships.all()
-        follower_usernames = [follower.follower.username for follower in followers]
-        return Response({'followers': follower_usernames}, status=status.HTTP_200_OK)
+        
+        followers = user.follower_relationships.filter().values(username=F('follower__username'),
+        full_name = F('follower__full_name'),profile_picture = F('follower__profile_picture')
+        )
+        followers_count = followers.count()
+        
+        following = user.following_relationships.filter().values(username=F('following__username'),
+        full_name = F('following__full_name'),profile_picture = F('following__profile_picture')
+        )
+        following_count = following.count()
+        
+        data = {
+            'followers_count': followers_count,
+            'following_count': following_count,
+            'followers': list(followers),
+            'following': list(following)
+        }
+        
+        return Response({'details': data}, status=status.HTTP_200_OK)
+
+
 
 class ListFollowing(APIView):
     def get(self, request,*args, **kwargs):
@@ -273,16 +304,88 @@ class Search(APIView):
     def get(self, request, *args, **kwargs):
         query = request.query_params.get('query', '')
         
-        users = CustomUser.objects.filter(Q(username__icontains=query) | Q(full_name__icontains=query))
+        # Search for users based on query and profile privacy
+        users = CustomUser.objects.filter(
+            (Q(username__icontains=query) | Q(full_name__icontains=query))
+            & (Q(profile_privacy='public') | Q(follower_relationships__follower=request.user))
+        )
+        
         user_results = [{'type': 'user', 'username': user.username, 'full_name': user.full_name} for user in users]
         
-        posts = Posts.objects.filter(content__icontains=query)
-        post_results = [{'type': 'post', 'id': post.id, 'content': post.content} for post in posts]
+        # Search for public posts and posts visible to the user's followers
+        public_posts = Posts.objects.filter(Q(content__icontains=query) & Q(post_privacy='public'))
+        follower_posts = Posts.objects.filter(Q(content__icontains=query) & Q(post_privacy='followers') & Q(user__follower_relationships__follower=request.user))
+        post_results = [{'type': 'post', 'id': post.id, 'content': post.content,'file':post.file} for post in (public_posts | follower_posts)]
         
-        groups = Groups.objects.filter(name__icontains=query)
-        group_results = [{'type': 'group', 'id': group.id, 'name': group.name} for group in groups]
+        # Search for public groups
+        public_groups = Groups.objects.filter(name__icontains=query)
+        group_results = [{'type': 'group', 'id': group.id, 'name': group.name} for group in public_groups]
         
         all_results = user_results + post_results + group_results
         
-        return Response({'results': all_results}, status=status.HTTP_200_OK)
+        return Response({'detail': all_results}, status=status.HTTP_200_OK)
+    
+
+class GetPosts(APIView):
+    def get(self,request,*args, **kwargs):
+        user = request.user
+        follower_posts = Posts.objects.filter(Q(post_privacy='public') | Q(post_privacy='followers') & Q(user__follower_relationships__follower=request.user)).annotate(
+            like_count=Count('likes'),comments_count=Count('comments'),reposts_count=Count('reposts')
+        ).order_by('created_at')
+        post_list = []
+        for post in follower_posts:
+            post_data = {
+                'id': post.id,
+                'content': post.content,
+                'file':post.file,
+                'created_at':post.created_at,
+                'likes':post.like_count,
+                'comments':post.comments_count,
+                'reposts':post.reposts_count,
+                'user': {
+                    'username': post.user.username,
+                    'full_name': post.user.full_name
+                },
+            }
+            post_list.append(post_data)
+        
+        return Response({'detail': post_list}, status=status.HTTP_200_OK)
+    
+class GetTrendingPosts(APIView):
+    def get(self, request, *args, **kwargs):
+        user = request.user
+        
+        # Annotate each post with its total interaction count
+        posts = Posts.objects.filter(Q(post_privacy='public') | Q(post_privacy='followers')).annotate(
+            interaction_count=Count('likes') + Count('comments') + Count('reposts')
+        ).order_by('-interaction_count')
+        
+        # Serialize each post to a dictionary
+        post_list = []
+        for post in posts:
+            post_data = {
+                'id': post.id,
+                'content': post.content,
+                'file': post.file,
+                'user': {
+                    'username': post.user.username,
+                    'full_name': post.user.full_name
+                },
+                'interaction_count': post.interaction_count,
+            }
+            post_list.append(post_data)
+        
+        return Response({'posts': post_list}, status=status.HTTP_200_OK)
+    
+    class GetPostsRecommendation(APIView):
+        def get(self,request,*args, **kwargs):
+            user = request.user
+            
+
+
+
+
+
+
+
 
