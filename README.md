@@ -90,7 +90,7 @@ There are two options here with regards to database. You can either use django's
 ## getting-started
 1. To get get started run python manage.py migrate to create your tables in database
 2. Run python manage.py runserver to start the server
-3. open another terminal and run celery -A django_assessment worker -l info --pool=solo to start the celery server
+3. open another terminal and run celery -A django_assessment worker -l info --pool=solo to start the celery server on windows and celery -A django_assessment worker -l info on unix based servers
 
 ## API Documentation
 below is the link to api documentation in postman

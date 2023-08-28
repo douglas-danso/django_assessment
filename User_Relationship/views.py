@@ -1,5 +1,6 @@
-from .models import UserRelationship,Groups
-from Authentication.models import CustomUser,Privacy
+# Import necessary modules and classes
+from .models import UserRelationship, Groups
+from Authentication.models import CustomUser, Privacy
 from rest_framework.views import APIView
 from django.http import JsonResponse
 from rest_framework.response import Response
@@ -7,163 +8,200 @@ from django.shortcuts import get_object_or_404
 from django.core.cache import cache
 from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.authentication import JWTAuthentication
-from .models import Posts,Comments
-from django.db.models import Q,F,Count
+from .models import Posts, Comments
+from django.db.models import Q, F, Count
 import cloudinary
 from rest_framework import status
-from .signals import get_new_followers,get_new_comments,like_a_post,like_a_comment
+from .tasks import *
 from helpers.utils import RecommendationAlgorithm
 from datetime import datetime
+from Authentication.tasks import delete_cloudinary_file_async
+from tempfile import NamedTemporaryFile
 
-
+# API view to create posts
 class MakePosts(APIView):
-    def upload_file(self, request, file):
-        if file:
-            try:
-                resource_type = 'image' if file.content_type.startswith('image') else 'video'
-                cloudinary_response = cloudinary.uploader.upload(file, resource_type=resource_type)
-                file_url = cloudinary_response['secure_url']
-                public_id = cloudinary_response['public_id']
-            except cloudinary.exceptions.Error as e:
-                return Response({'detail': 'Error uploading file'}, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            file_url = None
-            public_id = None
-        
-        context = {
-            "file_url": file_url,
-            "public_id": public_id
-        }
-        return context
-    
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
     def post(self, request, *args, **kwargs):
         user = request.user
         content = request.data.get('content')
         file_upload = request.FILES.get('file')
-        post_privacy  = request .data.get('post_privacy',Privacy.default_choice)
-        print(Privacy.privacy_choices)
+        post_privacy = request.data.get('post_privacy', Privacy.default_choice)
+
+        # Validate post privacy choice
         valid_privacy_choices = [choice[0] for choice in Privacy.privacy_choices]
         if post_privacy not in valid_privacy_choices:
             return Response({"detail": f"Invalid choice. Allowed values: {', '.join(valid_privacy_choices)}"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check for file upload
         if file_upload:
-            # Use ImageField and FileField validation
             if file_upload.content_type.startswith('image') or file_upload.content_type.startswith('video'):
-                data = self.upload_file(request, file_upload)
-                file_url = data.get('file_url')
-                public_id = data.get('public_id')
-                print(file_upload)
-                Posts.objects.create(file=file_url, content=content, user=user,post_privacy=post_privacy)
-                return Response({'detail': 'Post created successfully', 'public_id': public_id}, status=status.HTTP_200_OK)
+                resource_type = 'image' if file_upload.content_type.startswith('image') else 'video'
+                with NamedTemporaryFile(delete=False) as temp_file:
+                    for chunk in file_upload.chunks():
+                        temp_file.write(chunk)
+                    temp_file_path = temp_file.name
+                
+                # Start the Celery task asynchronously
+                async_upload_file.delay(temp_file_path, content, post_privacy, user.id, resource_type)
             else:
                 return Response({'detail': 'Invalid file type'}, status=status.HTTP_400_BAD_REQUEST)
         else:
-            Posts.objects.create(content=content, user=user,post_privacy=post_privacy)
+            # Create a post without file
+            Posts.objects.create(content=content, user=user, post_privacy=post_privacy)
             return Response({'detail': 'Post created successfully'}, status=status.HTTP_200_OK)
 
-class EditPost(APIView):      
+# API view to edit posts
+class EditPost(APIView): 
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
     def put(self, request, post_id, *args, **kwargs):
         user = request.user
         content = request.data.get('content')
         file_upload = request.FILES.get('file')
-        post_privacy  = request .data.get('post_privacy')
-        post = get_object_or_404(Posts,id=post_id)
+        post_privacy = request.data.get('post_privacy')
+        post = get_object_or_404(Posts, id=post_id)
         
+        # Check user permission
         if post.user != user:
             return Response({'detail': 'You don\'t have permission to edit this post.'}, status=status.HTTP_403_FORBIDDEN)
          
-        post_privacy  = request .data.get('post_privacy',Privacy.default_choice)
-        print(Privacy.privacy_choices)
+        # Validate post privacy choice
         valid_privacy_choices = [choice[0] for choice in Privacy.privacy_choices]
         if post_privacy not in valid_privacy_choices:
             return Response({"detail": f"Invalid choice. Allowed values: {', '.join(valid_privacy_choices)}"}, status=status.HTTP_400_BAD_REQUEST)
         else:
             post.post_privacy = post_privacy
             post.save()
+            
         if file_upload:
             if file_upload.content_type.startswith('image') or file_upload.content_type.startswith('video'):
-                file_object = MakePosts
-                data = file_object.upload_file(self,request, file_upload)
-                file_url = data.get('file_url')
-                public_id = data.get('public_id')
-                post.file = file_url
-                post.save()
+                file_url = post.file
+                delete_cloudinary_file_async.delay(file_url)
+                resource_type = 'image' if file_upload.content_type.startswith('image') else 'video'
+                # Save the uploaded file temporarily
+                with NamedTemporaryFile(delete=False) as temp_file:
+                    for chunk in file_upload.chunks():
+                        temp_file.write(chunk)
+                    temp_file_path = temp_file.name
                 
+                # Start the Celery task asynchronously
+                async_upload_file.delay(temp_file_path, content, post_privacy, user.id, resource_type)
             else:
                 return Response({'detail': 'Invalid file type'}, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            public_id=None
+            
         if content:
             post.content = content
             post.save()
-            return Response({'detail': 'Post updated successfully', 'public_id': public_id}, status=status.HTTP_200_OK)
-        
+            
+        return Response({'detail': 'Post updated successfully'}, status=status.HTTP_200_OK)
+
+# API view to delete posts
 class DeletePosts(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
     def delete(self, request, post_id, *args, **kwargs):
         user = request.user
-        post = get_object_or_404(Posts,id=post_id)
+        post = get_object_or_404(Posts, id=post_id)
+        
+        # Check user permission
         if post.user != user:
-            return Response({'detail': 'You don\'t have permission to edit this post.'}, status=status.HTTP_403_FORBIDDEN)   
+            return Response({'detail': 'You don\'t have permission to delete this post.'}, status=status.HTTP_403_FORBIDDEN)
+        
+        # Delete associated file from Cloudinary
+        if post.file:
+            file_url = post.file
+            delete_cloudinary_file_async.delay(file_url)   
         post.delete()
-        return Response({'details':'posts deleted successfully'},status=status.HTTP_200_OK)
-    
+        return Response({'details': 'Post deleted successfully'}, status=status.HTTP_200_OK)
 
-
+# API view to share posts
 class SharePost(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
     def post(self, request, post_id, *args, **kwargs):
         user = request.user
         original_post = get_object_or_404(Posts, id=post_id)
         
+        # Create a new post based on the original post
         new_post = Posts.objects.create(
             user=user,
             content=original_post.content,
-            file = original_post.file,
+            file=original_post.file,
             original_post=original_post 
         )
-        
+        user_email = original_post.user.email
+        send_notification_email.delay(user_email, "repost", original_post.content)
         return Response({'detail': 'Post shared successfully'}, status=status.HTTP_201_CREATED)
 
-    
+# API view to like or unlike posts
 class LikeOrUnlike(APIView):
-    def post(self,request,post_id):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request, post_id):
         user = request.user
-        post = get_object_or_404(Posts,id=post_id)
+        post = get_object_or_404(Posts, id=post_id)
         
+        # Toggle like/unlike for the post
         if user in post.likes.all():
             post.likes.remove(user)
             response = 'Post unliked!'
         else:
             post.likes.add(user)
             response = 'Post liked!'
+            user_email = post.user.email
+            send_notification_email.delay(user_email, "like", post.content)
         context = {
-            'message':response,
-            'count':post.likes.count()
+            'message': response,
+            'count': post.likes.count()
         }
-        return Response({'detail':context},status=status.HTTP_200_OK)
-    
-        
+        return Response({'detail': context}, status=status.HTTP_200_OK)
+
+# API view to create comments on posts
 class MakeComment(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
     def post(self, request, post_id, *args, **kwargs):
         user = request.user
         comment_text = request.data.get('comment')
         file_upload = request.FILES.get('file')
         parent_comment_id = request.data.get('parent_comment_id')
-        post=get_object_or_404(Posts,id=post_id)
+        post = get_object_or_404(Posts, id=post_id)
+        
+        # Check file upload and validate file type
         if file_upload:
-            file_url = MakePosts
-            data = file_url.upload_file(self,request, file_upload)
-            file_url = data.get('file_url')
-            public_id = data.get('public_id')
-        else:
-            file_url = None
-            public_id =None
-
+            if file_upload.content_type.startswith('image') or file_upload.content_type.startswith('video'):
+                file_url = post.file
+                delete_cloudinary_file_async.delay(file_url)
+                resource_type = 'image' if file_upload.content_type.startswith('image') else 'video'
+                # Save the uploaded file temporarily
+                with NamedTemporaryFile(delete=False) as temp_file:
+                    for chunk in file_upload.chunks():
+                        temp_file.write(chunk)
+                    temp_file_path = temp_file.name
+                
+                # Start the Celery task asynchronously
+                async_upload_file_comment.delay(temp_file_path, comment_text, user.id, resource_type, post_id, parent_comment_id)
+                user_email = post.user.email
+                send_notification_email.delay(user_email, "comment", post.content)
+                return Response({'detail': 'Comment created successfully'}, status=status.HTTP_201_CREATED)
+            else:
+                return Response({'detail': 'Invalid file type'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Create a comment without file
         comment = Comments.objects.create(
             comment_user=user,
             comment=comment_text,
-            file=file_url,
-            post = post 
+            post=post 
         )
         
+        # Handle parent comments
         parent_comment = None
         if parent_comment_id:
             try:
@@ -172,63 +210,58 @@ class MakeComment(APIView):
                 comment.save()
             except Comments.DoesNotExist:
                 pass
-        return Response({'detail': 'Comment created successfully', 'public_id': public_id}, status=status.HTTP_201_CREATED)
+        user_email = post.user.email
+        send_notification_email.delay(user_email, "comment", post.content)
+        return Response({'detail': 'Comment created successfully'}, status=status.HTTP_201_CREATED)
 
-
-        
-    
-
-
-    
-
-
-# class Timeline(APIView):
-#     def get(self, request, *args, **kwargs):
-#         user_id = request.user.id
-#         followed_users_ids = UserRelationship.objects.filter(follower=user_id).values_list('followed_id', flat=True)
-#         timeline_posts = Posts.objects.filter(Q(user=user_id) | Q(user__in=followed_users_ids)).prefetch_related('comments', 'likes').values_list
-#         timeline_posts = timeline_posts.order_by('-created_at')
-
-#         recommendation_algorithm = RecommendationAlgorithm()
-#         recommended_posts = recommendation_algorithm.get_content_based_filtered_posts(timeline_posts, k=5)
-
-#         timeline_posts |= recommended_posts
-
-
-#         return JsonResponse({'detail': list(timeline_posts)})
-
-
-
+# API view to follow or unfollow users
 class FollowOrUnfollow(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
     def post(self, request, username, *args, **kwargs):
         follower_user = request.user
         following_user = get_object_or_404(CustomUser, username=username)
         
+        # Check if the follower is trying to follow themselves
         if follower_user == following_user:
             return Response({'detail': "You can't follow/unfollow yourself."}, status=status.HTTP_400_BAD_REQUEST)
         
+        # Create or delete relationship based on whether already following
         relationship, created = UserRelationship.objects.get_or_create(
             follower=follower_user,
             following=following_user
         )
         if created:
+            user_email = following_user.email
+            follower_name = follower_user.full_name  
+            send_follow_notification_email.delay(user_email, follower_name)
             return Response({'detail': f'You are now following {following_user.username}'}, status=status.HTTP_200_OK)
         else:
             relationship.delete()
             return Response({'detail': f'You have unfollowed {following_user.username}'}, status=status.HTTP_200_OK)
 
+# API view to list followers and following of a user
 class ListFollowersAndFollowing(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
     def get(self, request, *args, **kwargs):
         username = request.GET.get('username')
         user = get_object_or_404(CustomUser, username=username)
         
-        followers = user.follower_relationships.filter().values(username=F('follower__username'),
-        full_name = F('follower__full_name'),profile_picture = F('follower__profile_picture')
+        # Retrieve followers and following relationships
+        followers = user.follower_relationships.filter().values(
+            username=F('follower__username'),
+            full_name=F('follower__full_name'),
+            profile_picture=F('follower__profile_picture')
         )
         followers_count = followers.count()
         
-        following = user.following_relationships.filter().values(username=F('following__username'),
-        full_name = F('following__full_name'),profile_picture = F('following__profile_picture')
+        following = user.following_relationships.filter().values(
+            username=F('following__username'),
+            full_name=F('following__full_name'),
+            profile_picture=F('following__profile_picture')
         )
         following_count = following.count()
         
@@ -240,20 +273,9 @@ class ListFollowersAndFollowing(APIView):
         }
         
         return Response({'details': data}, status=status.HTTP_200_OK)
-
-
-
-class ListFollowing(APIView):
-    def get(self, request,*args, **kwargs):
-        username = request.GET.get('username')
-        user = get_object_or_404(CustomUser, username=username)
-        following = user.following_relationships.all()
-        following_usernames = [follow.following.username for follow in following]
-        return Response({'following': following_usernames}, status=status.HTTP_200_OK)
-
-
-
 class CreateGroup(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
     def post(self, request, *args, **kwargs):
         name = request.data.get('name')
         admin = request.user
@@ -264,6 +286,8 @@ class CreateGroup(APIView):
         return Response({'detail': 'Group created successfully', 'group_id': group.id}, status=status.HTTP_201_CREATED)
 
 class ManageGroup(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
     def put(self, request, group_id, *args, **kwargs):
         group = get_object_or_404(Groups, id=group_id, admin=request.user)
         new_name = request.data.get('name')
@@ -279,6 +303,8 @@ class ManageGroup(APIView):
         return Response({'detail': 'Group deleted successfully'}, status=status.HTTP_204_NO_CONTENT)
 
 class JoinGroup(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
     def post(self, request, group_id, *args, **kwargs):
         group = get_object_or_404(Groups, id=group_id)
         user = request.user
@@ -289,6 +315,8 @@ class JoinGroup(APIView):
         return Response({'detail': f'You have joined {group.name}'}, status=status.HTTP_200_OK)
 
 class LeaveGroup(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
     def post(self, request, group_id, *args, **kwargs):
         group = get_object_or_404(Groups, id=group_id)
         user = request.user
@@ -298,9 +326,11 @@ class LeaveGroup(APIView):
             return Response({'detail': f'You have left the {group.name}'}, status=status.HTTP_200_OK)
         else:
             return Response({'detail': 'You are not a member of this group'}, status=status.HTTP_400_BAD_REQUEST)
-        
-
+# API view to search users, posts, and groups
 class Search(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
     def get(self, request, *args, **kwargs):
         query = request.query_params.get('query', '')
         
@@ -315,7 +345,7 @@ class Search(APIView):
         # Search for public posts and posts visible to the user's followers
         public_posts = Posts.objects.filter(Q(content__icontains=query) & Q(post_privacy='public'))
         follower_posts = Posts.objects.filter(Q(content__icontains=query) & Q(post_privacy='followers') & Q(user__follower_relationships__follower=request.user))
-        post_results = [{'type': 'post', 'id': post.id, 'content': post.content,'file':post.file} for post in (public_posts | follower_posts)]
+        post_results = [{'type': 'post', 'id': post.id, 'content': post.content, 'file': post.file} for post in (public_posts | follower_posts)]
         
         # Search for public groups
         public_groups = Groups.objects.filter(name__icontains=query)
@@ -324,24 +354,30 @@ class Search(APIView):
         all_results = user_results + post_results + group_results
         
         return Response({'detail': all_results}, status=status.HTTP_200_OK)
-    
 
+# API view to get posts
 class GetPosts(APIView):
-    def get(self,request,*args, **kwargs):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request, *args, **kwargs):
         user = request.user
+        
+        # Retrieve posts based on privacy settings and annotate with counts
         follower_posts = Posts.objects.filter(Q(post_privacy='public') | Q(post_privacy='followers') & Q(user__follower_relationships__follower=request.user)).annotate(
-            like_count=Count('likes'),comments_count=Count('comments'),reposts_count=Count('reposts')
+            like_count=Count('likes'), comments_count=Count('comments'), reposts_count=Count('reposts')
         ).order_by('created_at')
+        
         post_list = []
         for post in follower_posts:
             post_data = {
                 'id': post.id,
                 'content': post.content,
-                'file':post.file,
-                'created_at':post.created_at,
-                'likes':post.like_count,
-                'comments':post.comments_count,
-                'reposts':post.reposts_count,
+                'file': post.file,
+                'created_at': post.created_at,
+                'likes': post.like_count,
+                'comments': post.comments_count,
+                'reposts': post.reposts_count,
                 'user': {
                     'username': post.user.username,
                     'full_name': post.user.full_name
@@ -350,8 +386,14 @@ class GetPosts(APIView):
             post_list.append(post_data)
         
         return Response({'detail': post_list}, status=status.HTTP_200_OK)
+
+
     
+# API view to get trending posts
 class GetTrendingPosts(APIView):
+    authentication_classes = (JWTAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
     def get(self, request, *args, **kwargs):
         user = request.user
         
@@ -376,16 +418,5 @@ class GetTrendingPosts(APIView):
             post_list.append(post_data)
         
         return Response({'posts': post_list}, status=status.HTTP_200_OK)
-    
-    class GetPostsRecommendation(APIView):
-        def get(self,request,*args, **kwargs):
-            user = request.user
-            
-
-
-
-
-
-
 
 

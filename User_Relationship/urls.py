@@ -9,7 +9,6 @@ urlpatterns = [
     path('repost/<int:post_id>/', SharePost.as_view(), name='repost'),
     path('users/follow-toggle/<str:username>', FollowOrUnfollow.as_view(), name='follow'),
     path('users/followers/', ListFollowersAndFollowing.as_view(), name='list-followers'),
-    path('users/following/', ListFollowing.as_view(), name='list-following'),
     path('groups/create/', CreateGroup.as_view(), name='create-group'),
     path('groups/<int:group_id>/manage/', ManageGroup.as_view(), name='manage-group'),
     path('groups/<int:group_id>/join/', JoinGroup.as_view(), name='join-group'),

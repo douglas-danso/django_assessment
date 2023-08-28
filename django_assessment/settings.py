@@ -44,12 +44,12 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'Authentication',
     'User_Relationship',
-    'Notification',
     'rest_framework',
     'rest_framework.authtoken',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'dj_rest_auth',
+    
     
 ]
 AUTH_USER_MODEL = "Authentication.CustomUser"
@@ -103,6 +103,11 @@ POSTGRESQL_DB_CONF = {
 DATABASES = {
     "default": SQLITE_DB_CONF if os.getenv('DJANGO_ENVIRONMENT') == 'development' else POSTGRESQL_DB_CONF
 }
+# JWT settings
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+}
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
@@ -111,11 +116,7 @@ REST_FRAMEWORK = {
     ],
 }
 
-# JWT settings
-SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
-}
+
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
