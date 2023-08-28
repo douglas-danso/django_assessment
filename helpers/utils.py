@@ -1,13 +1,14 @@
 import jwt
 import os
 from Authentication.models import CustomUser
-from Notification.models import Notifications
 from django.db.models import Q
 from sklearn.metrics.pairwise import cosine_similarity
 from User_Relationship.models import Posts, UserRelationship
 from sklearn.feature_extraction.text import TfidfVectorizer
 import secrets
-
+import cloudinary
+from rest_framework.response import Response
+from rest_framework.views import status
 
 # def generate_secret_key():
 #     return secrets.token_hex(32)  # 32 bytes = 256 bits
@@ -36,36 +37,6 @@ def decode_token(encoded_token):
     except jwt.InvalidTokenError:
         return "Invalid token."
 
-
-def get_notifications(user):
-    notifications_filter = Q(user_id=user.id, notification_type__contains='user notification')
-    # Fetch notifications and related data
-    notifications = (
-        Notifications.objects
-        .filter(notifications_filter)
-        .order_by("-id")
-        .select_related('user')
-        .prefetch_related('user')[:7]
-    ).values_list('id', 'sender_id', 'detail', 'read', 'timestamp')
-
-    sender_ids = set(notification[1] for notification in notifications)
-    sender = CustomUser.objects.in_bulk(sender_ids)
-
-    notif = []
-    for notification in notifications:
-        sender_id = notification[1]
-        sender = sender.get(sender_id)
-        if sender:
-            notif.append({
-                "id": notification[0],
-                "sender_id": sender_id,
-                "name": sender.full_name,
-                "profile_picture": sender.profile_picture,
-                "detail": notification[2],
-                "read": notification[3],
-                "timestamp": notification[4].isoformat()
-            })
-    return notif
 
 
 class RecommendationAlgorithm:
@@ -142,5 +113,12 @@ class RecommendationAlgorithm:
 
         return recommended_posts
 
-
+def delete_cloudinary_file(public_id):
+    try:
+        # Delete the file from Cloudinary
+        cloudinary.uploader.destroy(public_id)
+            
+    except cloudinary.api.Error as e:
+        return Response({"error": str(e)}, status=status)
+    return Response({"detail": "File deleted successfully"}, status=status.HTTP_200_OK)
     

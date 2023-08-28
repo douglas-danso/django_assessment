@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from .serializers import *
 from rest_framework.permissions import AllowAny,IsAuthenticated,IsAdminUser
-from helpers.permissions import IsAdminOrReadOnly
+from helpers.utils import delete_cloudinary_file
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from .models import CustomUser
 from django.urls import reverse
@@ -22,19 +22,34 @@ from helpers.utils import decode_token,encode_token
 from rest_framework_simplejwt.exceptions import TokenError
 import cloudinary
 import cloudinary.uploader
+from .tasks import *
+import kombu
 
 
 class SignUp(APIView):
     def post(self, request, *args, **kwargs):
-        data=request.data
+        data = request.data
         serializer = UserSerializer(data=data)
         if serializer.is_valid():
             user = serializer.save()
-            print(user.email)
-            send_activation_email(request=request, user=user)
+
+            # Pass relevant data to the Celery task
+            request_data = {
+                'host': request.get_host()
+            }
+            user_data = {
+                'email': user.email,
+                'full_name': user.full_name,
+            }
+            try:
+                send_activation_email_async.apply_async(args=[request_data, user_data])  
+            except:
+                send_activation_email(request=request,user=user)
+
             return Response({"detail": "You have signed up successfully. Please check your email to activate your account."},
-                        status=status.HTTP_201_CREATED)    
-        return Response({"detail": serializer.validate(data)}, status=status.HTTP_400_BAD_REQUEST)
+                            status=status.HTTP_201_CREATED)
+        return Response({"detail": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+
         
         
 
@@ -80,7 +95,17 @@ class ResendActivationLink(generics.GenericAPIView):
         if user.is_active == True and user.is_verified== True:
             return Response('detail: user is already verified')
         else:
-            send_activation_email(request, user)
+            request_data = {
+                'host': request.get_host()
+            }
+            user_data = {
+                'email': user.email,
+                'full_name': user.full_name,
+            }
+            try:
+                send_activation_email_async.apply_async(args=[request_data, user_data])  
+            except:
+                send_activation_email(request=request,user=user)
             return Response('detail: activation email sent')
 
 class Activate(APIView):
@@ -89,7 +114,7 @@ class Activate(APIView):
         try:
             decoded_token = decode_token(token)
             user_email = decoded_token['email']
-            print(user_email)
+            
             user = CustomUser.objects.get(email=user_email)
         except (jwt.exceptions.DecodeError, CustomUser.DoesNotExist):
             raise Http404('Invalid activation link')
@@ -110,18 +135,15 @@ class PasswordResetView(generics.GenericAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = CustomUser.objects.get(email=serializer.validated_data['email'])
-        token_generator = PasswordResetTokenGenerator()
-        token = token_generator.make_token(user)
-        uidb64 = urlsafe_base64_encode(force_bytes(user.pk))
-        reset_url = request.build_absolute_uri(
-                 reverse('passwordresetconfirm', kwargs={'uidb64': uidb64, 'token': token}))
-            # Send the reset URL to the user by email
-        subject = 'Password reset'
-        message = f'Use this link to reset your password: {reset_url}'
-        from_email = 'douglasdanso66@gmail.com'
-        recipient_list = [user.email]
-        send_mail(subject, message, from_email, recipient_list, fail_silently=False)
-
+        request_data = {
+                'uri': request.build_absolute_uri
+            }
+        user_data = {
+            'email': user.email,
+            'full_name': user.full_name,
+            }
+        send_passwordreset_email_async.apply_async(args=[request_data,user_data])
+        
         # Return a success message
         return Response({'success': 'Password reset email has been sent'}, status=status.HTTP_200_OK)
     
@@ -182,7 +204,7 @@ class DeleteAccount(generics.GenericAPIView):
         encoded_id =kwargs.get("id")
         user_id = decode_token(encoded_id)
         id = user_id.get('user_id')
-        user = CustomUser.objects.get(id = id)
+        user = get_object_or_404(CustomUser,id=id)
         user.delete()
         return Response({"detail":"Account deleted successfully"},status=status.HTTP_200_OK)
 
@@ -229,11 +251,9 @@ class DeleteProfilePicture(APIView):
         except CustomUser.DoesNotExist:
            return Response({"detail": "Image not found"}, status=status.HTTP_404_NOT_FOUND) 
         try:
-            # Delete the file from Cloudinary
-            cloudinary.uploader.destroy(public_id)
-            
-        except cloudinary.api.Error as e:
-            return Response({"error": str(e)}, status=status)
+            delete_cloudinary_file_async.apply_async(args=[public_id])
+        except:
+            delete_cloudinary_file(public_id)
         return Response({"detail": "File deleted successfully"}, status=status.HTTP_200_OK)
 
 class UserLists(generics.ListAPIView):
